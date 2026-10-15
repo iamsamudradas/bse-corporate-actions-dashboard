@@ -270,6 +270,91 @@ def apply_screening(data):
     return pd.concat([data.reset_index(drop=True), results.reset_index(drop=True)], axis=1)
 
 
+
+# ------------------------ AI RESEARCH ASSISTANT ------------------------
+
+def get_openai_settings():
+    """Read credentials from Streamlit Secrets; never hard-code API keys."""
+    try:
+        api_key = str(st.secrets.get("OPENAI_API_KEY", "")).strip()
+        model = str(st.secrets.get("OPENAI_MODEL", "gpt-4.1-mini")).strip()
+    except Exception:
+        api_key, model = "", "gpt-4.1-mini"
+    return api_key, model or "gpt-4.1-mini"
+
+
+def generate_ai_analysis(row):
+    """Create a cautious, data-grounded explanation; deterministic rules stay authoritative."""
+    api_key, model = get_openai_settings()
+    if not api_key:
+        return None, (
+            "AI is not configured yet. Add `OPENAI_API_KEY` to Streamlit Cloud "
+            "Secrets (steps are included in the setup guide)."
+        )
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=api_key, timeout=45.0, max_retries=1)
+
+        def safe_value(value):
+            if value is None:
+                return "Unavailable"
+            try:
+                if pd.isna(value):
+                    return "Unavailable"
+            except (TypeError, ValueError):
+                pass
+            if isinstance(value, (pd.Timestamp, datetime)):
+                return value.strftime("%Y-%m-%d")
+            return str(value)
+
+        payload = {
+            "security_code": safe_value(row.get("Security Code")),
+            "security_name": safe_value(row.get("Security Name")),
+            "corporate_action_category": safe_value(row.get("Category")),
+            "purpose_as_returned_by_BSE": safe_value(row.get("Purpose")),
+            "ex_date": safe_value(row.get("Ex Date")),
+            "current_price_in_INR": safe_value(row.get("Current Price")),
+            "estimated_dividend_yield_percent": safe_value(row.get("Dividend Yield (%)")),
+            "deterministic_screening_status": safe_value(row.get("Screening Status")),
+            "deterministic_screening_reason": safe_value(row.get("Screening Reason")),
+        }
+
+        instructions = """
+You are a cautious research assistant inside a corporate-actions screening dashboard.
+Explain the supplied corporate-action record in plain English for a retail investor.
+Use only the facts included in the input. The input may contain incomplete, stale, or
+incorrectly parsed data. Do not browse or imply that you verified outside sources.
+Do not invent company fundamentals, earnings, debt, valuation, market performance,
+dividend history, dividend sustainability, board intentions, or future returns.
+Do not make a personal recommendation to buy, sell, or hold. The app's deterministic
+screening status is calculated separately; do not change or override it.
+If dividend yield is provided, explicitly say it is an estimate and that the method
+may be inaccurate because it is derived from parsed corporate-action purpose text.
+If a field is unavailable, say so rather than guessing.
+Structure the answer with these headings:
+1. What the corporate action appears to be
+2. What the current screen says
+3. Potential implications (conditional, not predictions)
+4. Risks and data-quality warnings
+5. What to verify before making a decision
+Keep it concise, specific to the supplied record, and distinguish facts from possibilities.
+End with a brief note that this is informational research, not personalized financial advice.
+"""
+        response = client.responses.create(
+            model=model,
+            instructions=instructions,
+            input="Analyze this BSE corporate-action record:\n" + __import__("json").dumps(payload, ensure_ascii=False),
+        )
+        return response.output_text.strip(), None
+    except Exception as exc:
+        # Keep the detailed error in the server logs; give the user a safe, useful message.
+        return None, (
+            f"AI analysis could not be generated ({type(exc).__name__}). "
+            "Check the API key, model name, billing/API access, and Streamlit Cloud logs."
+        )
+
+
 # ------------------------ UI HELPERS ------------------------
 
 def status_badge(status):
@@ -362,14 +447,35 @@ def render_screener(data, security_code):
         },
     )
 
-    st.markdown("""
-    <div class="purpose-card">
-      <div class="section-kicker">Coming next · AI research assistant</div>
-      <p>This profile can later include AI-generated explanations, risk flags,
-      dividend sustainability checks and supporting announcements. For now,
-      the result is determined only by the configured rules.</p>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("### AI research assistant")
+    st.write(
+        "Generate a plain-English explanation of this corporate action, possible implications, "
+        "data-quality concerns, and what to verify next. The AI reads the record shown here; "
+        "it does not independently verify announcements or change the rule-based screening status."
+    )
+
+    ai_state_key = f"ai_analysis_{security_code}"
+    ai_error_key = f"ai_analysis_error_{security_code}"
+    if st.button("✨ Analyse this security with AI", type="primary", key=f"analyse_ai_{security_code}"):
+        st.session_state.pop(ai_state_key, None)
+        st.session_state.pop(ai_error_key, None)
+        with st.spinner("Generating a cautious, data-grounded analysis…"):
+            analysis_text, analysis_error = generate_ai_analysis(row)
+        if analysis_text:
+            st.session_state[ai_state_key] = analysis_text
+        if analysis_error:
+            st.session_state[ai_error_key] = analysis_error
+
+    if st.session_state.get(ai_error_key):
+        st.warning(st.session_state[ai_error_key])
+        if "OPENAI_API_KEY" in st.session_state.get(ai_error_key, ""):
+            st.info("Configure the key in Streamlit Cloud → app → Settings → Secrets, then reboot the app.")
+    if st.session_state.get(ai_state_key):
+        st.markdown(st.session_state[ai_state_key])
+        st.caption("AI-generated explanation based only on the fields currently available in this dashboard. Verify facts against official company and BSE announcements.")
+    else:
+        st.caption("AI analysis runs only when you press the button. API usage may incur charges.")
+
     st.caption("Rule-based screening is not a guarantee of investment performance or personalized financial advice.")
 
 
