@@ -1,0 +1,3 @@
+streamlit>=1.40
+pandas>=2.1
+bse>=3.3.0
